@@ -1,0 +1,41 @@
+name: Fetch Kleinanzeigen
+
+on:
+  schedule:
+    # 06:00 UTC = 08:00 Europe/Berlin
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      run_reason:
+        description: "Why run?"
+        required: false
+        default: "manual"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run watcher
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
+        run: |
+          python kleinanzeigen_watcher.py
