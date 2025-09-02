@@ -198,7 +198,16 @@ def _fetch_detail_price(url: str):
     except Exception:
         return None
 
-
+def price_within(price, lo, hi):
+    if lo is None and hi is None:
+        return True
+    if price is None:
+        return False  # require a parsed price when limits are set
+    if lo is not None and price < lo:
+        return False
+    if hi is not None and price > hi:
+        return False
+    return True
 
 
 # ---------- Location IDs ----------
@@ -400,6 +409,10 @@ def main():
                     posted_at, loc_in_meta = parts
                 elif len(parts) == 1:
                     loc_in_meta = parts[0]
+
+            # enforce client-side price limits
+            if not price_within(it["price_eur"], price_min, price_max):
+                continue
 
             to_append.append([
                 it["ad_id"], query, it["title"],
