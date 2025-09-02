@@ -133,25 +133,38 @@ def ad_id_from_url(url):
     return m.group(1) if m else url
 
 def fetch_listings(search_url):
-    r = requests.get(search_url, headers=HEADERS, timeout=20)
+    r = requests.get(search_url, headers=HEADERS, timeout=25)
     r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    cards = soup.select(AD_CARD_SELECTOR)
+    html = r.text
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Broader, resilient selectors (match current site markup)
+    cards = soup.select("article.aditem, li.ad-listitem, div.aditem")
+
     items = []
     for c in cards:
-        a = c.select_one(TITLE_SELECTOR)
+        a = c.select_one(
+            ".aditem-main--middle--title a, a.ellipsis, a.ellipsis-text"
+        )
         if not a or not a.get("href"):
             continue
+
         url = a["href"]
         if url.startswith("/"):
             url = BASE_HOST + url
         title = a.get_text(strip=True)
 
-        price_el = c.select_one(PRICE_SELECTOR)
+        price_el = c.select_one(
+            ".aditem-main--middle--price-shipping .aditem-main--middle--price, "
+            ".aditem-main--middle--price, .aditem-price"
+        )
         price_eur = parse_price_eur(price_el.get_text(strip=True) if price_el else "")
 
-        meta_el = c.select_one(META_SELECTOR)
+        meta_el = c.select_one(
+            ".aditem-main--top .aditem-main--top--left, .aditem-main--top"
+        )
         meta_text = meta_el.get_text(" ", strip=True) if meta_el else ""
+
         km = extract_km(c.get_text(" ", strip=True))
 
         items.append({
@@ -162,6 +175,7 @@ def fetch_listings(search_url):
             "meta": meta_text,
             "url": url,
         })
+
     return items
 
 def load_existing_ad_ids():
