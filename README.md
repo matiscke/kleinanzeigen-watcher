@@ -6,6 +6,7 @@ Regularly searches **Kleinanzeigen.de** for products listed in a **Google Sheet*
 - Global **max radius** (km) and **fetch frequency** (informational) from the `Config` tab.
 - Per search: query, location/ZIP, min/max price; for `type=vehicle` optionally `km_min`/`km_max`.
 - Results are written into the **`Results`** tab of the same sheet (duplicates are skipped).
+- Uses a dedicated `LocationIDs` tab to ensure searches are restricted to the correct city/region.
 - Runs automatically via **GitHub Actions** (daily; cron can be customized).
 
 ---
@@ -19,17 +20,32 @@ Regularly searches **Kleinanzeigen.de** for products listed in a **Google Sheet*
 | fetch_frequency| daily |
 
 ### Tab `Searches`
-| active | query               | location | price_min | price_max | type     | km_min | km_max |
-|-------:|---------------------|----------|----------:|----------:|----------|-------:|-------:|
-| TRUE   | Road Bike Carbon 54 | Berlin   | 300       | 1200      | generic  |        |        |
-| TRUE   | VW Golf 7           | 10115    | 4000      | 11000     | vehicle  | 40000  | 140000 |
+| active | query     | location | price_min | price_max | type    | km_min | km_max |
+|--------|-----------|----------|-----------|-----------|---------|--------|--------|
+| TRUE   | iPhone 13 | Berlin   | 200       | 800       | generic |        |        |
+| TRUE   | VW Golf   | München  | 3000      | 10000     | vehicle | 40000  | 140000 |
+
+### Tab `LocationIDs`
+To make sure the search really stays limited to your city + radius, you need to provide the correct **location IDs** (`lXXXX` codes from Kleinanzeigen URLs).
+
+| city     | location_id |
+|----------|-------------|
+| Berlin   | 3331        |
+| Hamburg  | 2760        |
+| Garching | 6303        |
+| München  | 6411        |
+| Augsburg | 7518        |
+
+- **city**: must match the `location` column in the `Searches` tab (case-insensitive).  
+- **location_id**: the numeric part after `lXXXX` in a Kleinanzeigen URL. Example:  
+  - Search “Berlin” manually on Kleinanzeigen → URL contains `.../k0l3331r25...` → `3331` is the ID for Berlin.  
+- If no ID is provided, the script falls back to a slug-only search (`s-berlin`), which may show results from all of Germany.  
+- For accurate searches you should maintain this tab with the IDs you need.
 
 ### Tab `Results` (written by the script)
 | ad_id | query | title | price_eur | km | location | url | posted_at | fetched_at |
 |-------:|--------|----------|----------:|----------:|----------|-------:|-------:|-------:|
 
-
-> Tip: Create these three tabs exactly as shown and add a few rows in `Searches` first.
 
 ---
 
