@@ -113,14 +113,22 @@ def build_search_url(query, location_str, radius_km, price_min, price_max, loc_i
     return base
 
 # ---------- Parsing ----------
-def parse_price_eur(text):
+def parse_price_eur(text: str):
     if not text:
         return None
     t = text.lower()
     if "verschenken" in t:
         return 0
-    m = re.search(r"(\d{1,3}(?:[.\s]\d{3})*|\d+)", text.replace("\xa0", ""))
-    return int(m.group(1).replace(".", "").replace(" ", "")) if m else None
+    raw = text.replace("\xa0", " ").strip()
+    # match integer + optional decimal part
+    m = re.search(r"(\d{1,3}(?:[.\s]\d{3})*|\d+)(?:[,\.]\d{1,2})?", raw)
+    if not m:
+        return None
+    num = m.group(1).replace(".", "").replace(" ", "")
+    try:
+        return int(num)
+    except ValueError:
+        return None
 
 def extract_km(text_blob):
     if not text_blob:
