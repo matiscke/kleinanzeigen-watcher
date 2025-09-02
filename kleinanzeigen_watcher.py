@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote_plus
 import requests
 from bs4 import BeautifulSoup
+import json as _json
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -145,6 +146,61 @@ def prune_results_rows_not_in_active_queries():
     except Exception as e:
         print("Prune failed:", e)
 
+
+def _parse_price_from_detail_html(html: str):
+    if not html:
+        return None
+    # 1) JSON-LD
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for s in soup.select('script[type="application/ld+json"]'):
+            try:
+                data = _json.loads(s.string or "")
+            except Exception:
+                continue
+            # normalize possible list
+            for node in (data if isinstance(data, list) else [data]):
+                # common places for price
+                offer = node.get("offers") if isinstance(node, dict) else None
+                if isinstance(offer, dict) and ("price" in offer or "priceCurrency" in offer):
+                    p = offer.get("price")
+                    if isinstance(p, (int, float)) or (isinstance(p, str) and p.strip().isdigit()):
+                        return int(float(p))
+                if "price" in node:
+                    p = node.get("price")
+                    if isinstance(p, (int, float)) or (isinstance(p, str) and p.strip().isdigit()):
+                        return int(float(p))
+    except Exception:
+        pass
+
+    # 2) Microdata / visible price nodes
+    try:
+        # re-use soup if present, else parse
+        soup = soup if 'soup' in locals() else BeautifulSoup(html, "html.parser")
+        # itemprop price
+        el = soup.select_one('[itemprop="price"]')
+        if el:
+            val = el.get("content") or el.get_text(" ", strip=True)
+            return parse_price_eur(val)
+        # common classes
+        el = soup.select_one(".price, .boxedprice, .articleprice, .shopprice, h2.price, div.price")
+        if el:
+            return parse_price_eur(el.get_text(" ", strip=True))
+    except Exception:
+        pass
+    return None
+
+def _fetch_detail_price(url: str):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        return _parse_price_from_detail_html(r.text)
+    except Exception:
+        return None
+
+
+
+
 # ---------- Location IDs ----------
 def normalize_city(s: str) -> str:
     return (s or "").strip().lower()
@@ -183,12 +239,15 @@ def build_search_url(query, location_str, radius_km, price_min, price_max, loc_i
 def parse_price_eur(text: str):
     if not text:
         return None
-    t = text.lower()
+    t = text.lower().replace("\xa0", " ").strip()
     if "verschenken" in t:
         return 0
-    raw = text.replace("\xa0", " ").strip()
-    # match integer + optional decimal part
-    m = re.search(r"(\d{1,3}(?:[.\s]\d{3})*|\d+)(?:[,\.]\d{1,2})?", raw)
+    # strip common labels
+    for lab in ("vb", "verhandlungsbasis", "festpreis", "zu verschenken", "ca.", "circa"):
+        t = t.replace(lab, " ")
+    t = t.replace("€", " ").replace("eur", " ").replace(",", ".")
+    # keep digits, dots and spaces; capture first number block
+    m = re.search(r"(\d{1,3}(?:[.\s]\d{3})*|\d+)(?:\.\d{1,2})?", t)
     if not m:
         return None
     num = m.group(1).replace(".", "").replace(" ", "")
@@ -213,33 +272,40 @@ def fetch_listings(search_url):
     html = r.text
     soup = BeautifulSoup(html, "html.parser")
 
-    # Broader, resilient selectors (match current site markup)
     cards = soup.select("article.aditem, li.ad-listitem, div.aditem")
-
     items = []
+    detail_lookups = 0
+    DETAIL_LOOKUP_LIMIT = 10  # be nice to the site
+
     for c in cards:
-        a = c.select_one(
-            ".aditem-main--middle--title a, a.ellipsis, a.ellipsis-text"
-        )
+        a = c.select_one(".aditem-main--middle--title a, a.ellipsis, a.ellipsis-text")
         if not a or not a.get("href"):
             continue
-
         url = a["href"]
         if url.startswith("/"):
             url = BASE_HOST + url
         title = a.get_text(strip=True)
 
-        price_el = c.select_one(
-            ".aditem-main--middle--price-shipping .aditem-main--middle--price, "
-            ".aditem-main--middle--price, .aditem-price"
-        )
-        price_eur = parse_price_eur(price_el.get_text(strip=True) if price_el else "")
+        # try to read any price-ish text from the card; if empty, fetch detail
+        price_text = ""
+        nodes = c.select(".aditem-main--middle--price, .aditem-price, .stat-price, .price")
+        if nodes:
+            price_text = " ".join(n.get_text(" ", strip=True) for n in nodes).strip()
+        if not price_text:
+            container = c.select_one(".aditem-main--middle--price-shipping") or c.select_one(".aditem-details")
+            if container:
+                price_text = container.get_text(" ", strip=True)
 
-        meta_el = c.select_one(
-            ".aditem-main--top .aditem-main--top--left, .aditem-main--top"
-        )
+        price_eur = parse_price_eur(price_text)
+
+        if price_eur is None and detail_lookups < DETAIL_LOOKUP_LIMIT:
+            detail_lookups += 1
+            dp = _fetch_detail_price(url)
+            if isinstance(dp, int):
+                price_eur = dp
+
+        meta_el = c.select_one(".aditem-main--top .aditem-main--top--left, .aditem-main--top")
         meta_text = meta_el.get_text(" ", strip=True) if meta_el else ""
-
         km = extract_km(c.get_text(" ", strip=True))
 
         items.append({
@@ -352,7 +418,7 @@ def main():
         print("No new results.")
 
     prune_results_rows_not_in_active_queries()
-    
+
 
 if __name__ == "__main__":
     main()
