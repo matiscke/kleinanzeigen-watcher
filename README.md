@@ -26,6 +26,8 @@ Regularly searches **Kleinanzeigen.de** for products listed in a **Google Sheet*
 
 ### Tab `Results` (written by the script)
 | ad_id | query | title | price_eur | km | location | url | posted_at | fetched_at |
+|-------:|--------|----------|----------:|----------:|----------|-------:|-------:|-------:|
+
 
 > Tip: Create these three tabs exactly as shown and add a few rows in `Searches` first.
 
