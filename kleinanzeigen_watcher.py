@@ -78,6 +78,73 @@ def get_config():
     frequency = cfg.get("fetch_frequency", "daily")
     return max_radius, frequency
 
+def get_active_queries():
+    rows = read_sheet_range(SEARCHES_TAB)
+    if not rows or len(rows) < 2:
+        return set()
+    header = [h.lower() for h in rows[0]]
+    idx = {h: i for i, h in enumerate(header)}
+    if "active" not in idx or "query" not in idx:
+        return set()
+    active = set()
+    for r in rows[1:]:
+        r += [""] * (len(header) - len(r))
+        if str(r[idx["active"]]).strip().lower() in ("true","1","yes","y","ja"):
+            q = str(r[idx["query"]]).strip()
+            if q:
+                active.add(q)
+    return active
+
+def prune_results_rows_not_in_active_queries():
+    rows = read_sheet_range(RESULTS_TAB)
+    if not rows or len(rows) < 2:
+        return
+    header = rows[0]
+    try:
+        q_col = header.index("query")
+    except ValueError:
+        return
+    active_q = get_active_queries()
+
+    # collect 0-based row indices (excluding header) to delete
+    to_delete = []
+    for i, r in enumerate(rows[1:], start=1):
+        q = r[q_col].strip() if len(r) > q_col else ""
+        if q not in active_q:
+            to_delete.append(i)
+    if not to_delete:
+        return
+
+    # need sheetId for batchUpdate deleteDimension
+    meta = SHEETS.get(spreadsheetId=SHEET_ID, includeGridData=False).execute()
+    sheet_id_map = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta["sheets"]}
+    results_sheet_id = sheet_id_map.get(RESULTS_TAB)
+    if results_sheet_id is None:
+        return
+
+    # delete from bottom to top
+    to_delete.sort(reverse=True)
+    requests = [
+        {
+          "deleteDimension": {
+            "range": {
+              "sheetId": results_sheet_id,
+              "dimension": "ROWS",
+              "startIndex": idx_row,
+              "endIndex": idx_row + 1
+            }
+          }
+        }
+        for idx_row in to_delete
+    ]
+    try:
+        build("sheets", "v4", credentials=CREDS).spreadsheets().batchUpdate(
+            spreadsheetId=SHEET_ID, body={"requests": requests}
+        ).execute()
+        print(f"Pruned {len(to_delete)} rows from Results (inactive queries).")
+    except Exception as e:
+        print("Prune failed:", e)
+
 # ---------- Location IDs ----------
 def normalize_city(s: str) -> str:
     return (s or "").strip().lower()
@@ -283,6 +350,9 @@ def main():
         print(f"Added {len(to_append)} new rows.")
     else:
         print("No new results.")
+
+    prune_results_rows_not_in_active_queries()
+    
 
 if __name__ == "__main__":
     main()
