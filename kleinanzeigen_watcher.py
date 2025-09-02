@@ -1,6 +1,6 @@
 import os, re, time, json
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import quote_plus
 import requests
 from bs4 import BeautifulSoup
 
@@ -10,7 +10,6 @@ from googleapiclient.discovery import build
 # ---------- Google Sheets ----------
 SHEET_ID = os.getenv("SHEET_ID")
 SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-
 if not SHEET_ID or not SERVICE_ACCOUNT_JSON:
     raise SystemExit("Env missing: SHEET_ID and GOOGLE_APPLICATION_CREDENTIALS_JSON are required.")
 
@@ -21,9 +20,10 @@ SHEETS = build("sheets", "v4", credentials=CREDS).spreadsheets()
 CONFIG_TAB = "Config"
 SEARCHES_TAB = "Searches"
 RESULTS_TAB = "Results"
+LOCATIONS_TAB = "LocationIDs"
 
 # ---------- Kleinanzeigen ----------
-BASE_SEARCH_URL = "https://www.kleinanzeigen.de/s-suche.html"
+BASE_HOST = "https://www.kleinanzeigen.de"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (+https://github.com/your-org/kleinanzeigen-watcher)",
     "Accept-Language": "de-DE,de;q=0.9",
@@ -36,6 +36,7 @@ META_SELECTOR = ".aditem-main--top .aditem-main--top--left"
 
 KM_REGEX = re.compile(r"(\d{1,3}(?:[.\s]\d{3})+|\d{1,6})\s*km", re.IGNORECASE)
 
+# ---------- Google Sheets helpers ----------
 def read_sheet_range(tab, rng="A:Z"):
     res = SHEETS.values().get(spreadsheetId=SHEET_ID, range=f"{tab}!{rng}").execute()
     return res.get("values", [])
@@ -77,14 +78,41 @@ def get_config():
     frequency = cfg.get("fetch_frequency", "daily")
     return max_radius, frequency
 
-def build_search_url(query, location, radius_km, price_min, price_max):
-    params = {"keywords": query, "locationStr": location, "radius": radius_km}
+# ---------- Location IDs ----------
+def normalize_city(s: str) -> str:
+    return (s or "").strip().lower()
+
+def load_location_ids():
+    rows = read_sheet_range(LOCATIONS_TAB, "A:B")
+    loc_map = {}
+    if not rows:
+        return loc_map
+    start_idx = 1 if rows and rows[0] and normalize_city(rows[0][0]) in ("city", "stadt") else 0
+    for r in rows[start_idx:]:
+        if len(r) < 2:
+            continue
+        city = normalize_city(r[0])
+        loc_id = re.sub(r"\D", "", r[1]) if r[1] else ""
+        if city and loc_id:
+            loc_map[city] = loc_id
+    return loc_map
+
+# ---------- URL builder ----------
+def build_search_url(query, location_str, radius_km, price_min, price_max, loc_id=None):
+    q = quote_plus(query or "")
+    slug = (location_str or "").strip().lower().replace(" ", "-") or "deutschland"
+    base = f"{BASE_HOST}/s-{slug}/{q}/k0"
+    if loc_id:
+        base += f"l{loc_id}"
+    if radius_km:
+        base += f"r{int(radius_km)}"
     if price_min is not None or price_max is not None:
         lo = str(price_min) if price_min is not None else ""
         hi = str(price_max) if price_max is not None else ""
-        params["price"] = f"{lo}-{hi}"
-    return f"{BASE_SEARCH_URL}?{urlencode(params)}"
+        base += f"p{lo}p{hi}"
+    return base
 
+# ---------- Parsing ----------
 def parse_price_eur(text):
     if not text:
         return None
@@ -116,7 +144,7 @@ def fetch_listings(search_url):
             continue
         url = a["href"]
         if url.startswith("/"):
-            url = "https://www.kleinanzeigen.de" + url
+            url = BASE_HOST + url
         title = a.get_text(strip=True)
 
         price_el = c.select_one(PRICE_SELECTOR)
@@ -140,10 +168,12 @@ def load_existing_ad_ids():
     rows = read_sheet_range(RESULTS_TAB, "A2:A")
     return {r[0] for r in rows if r}
 
+# ---------- Main ----------
 def main():
     ensure_headers(RESULTS_TAB, ["ad_id", "query", "title", "price_eur", "km", "location", "url", "posted_at", "fetched_at"])
 
     max_radius, _ = get_config()
+    city_to_id = load_location_ids()
 
     searches = read_sheet_range(SEARCHES_TAB)
     if not searches or len(searches) < 2:
@@ -156,13 +186,13 @@ def main():
     for r in required:
         if r not in idx:
             raise RuntimeError(f"Missing column in Searches: {r}")
+    has_loc_id_col = "location_id" in idx
 
     existing_ids = load_existing_ad_ids()
     to_append = []
     now_iso = datetime.now(timezone.utc).isoformat()
 
     for row in searches[1:]:
-        # Robust gegen fehlende/kurze Zeilen
         row += [""] * (len(header) - len(row))
 
         active_val = str(row[idx["active"]]).strip().lower()
@@ -181,12 +211,20 @@ def main():
             km_min = int(str(row[idx["km_min"]]).replace("_","")) if str(row[idx["km_min"]]).strip() else None
             km_max = int(str(row[idx["km_max"]]).replace("_","")) if str(row[idx["km_max"]]).strip() else None
 
-        url = build_search_url(query, location, max_radius, price_min, price_max)
+        loc_id = None
+        if has_loc_id_col:
+            raw = str(row[idx["location_id"]]).strip()
+            loc_id = re.sub(r"\D", "", raw) if raw else None
+        if not loc_id:
+            loc_id = city_to_id.get(normalize_city(location))
+
+        url = build_search_url(query, location, max_radius, price_min, price_max, loc_id=loc_id)
+
         try:
             items = fetch_listings(url)
         except Exception as e:
             print(f"Fetch failed for {query} @ {location}: {e}")
-            time.sleep(3)
+            time.sleep(2)
             continue
 
         for it in items:
@@ -216,7 +254,7 @@ def main():
             ])
             existing_ids.add(it["ad_id"])
 
-        time.sleep(1.5)  # freundlich bleiben
+        time.sleep(1.2)
 
     if to_append:
         write_rows_append(RESULTS_TAB, to_append)
